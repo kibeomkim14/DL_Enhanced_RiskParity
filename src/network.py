@@ -23,3 +23,22 @@ class MLP(nn.Module):
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         output = self.layer(x)
         return output
+
+
+class PortfolioLayer(nn.Module):
+    def __init__(self, asset_num:int=8, error_adjusted:bool=True):
+        super(self,).__init__()
+        self.asset_num = asset_num
+        if error_adjusted:
+            self.input_dim = asset_num * 3
+        else: 
+            self.input_dim = asset_num * 2
+
+        self.layer = nn.Sequential(
+                            nn.Linear(self.input_dim,self.asset_num+1), # account for the cash position
+                            nn.Softmax(dim=0)
+                        )
+    
+    def forward(self, input):
+        output = self.layer(input)
+        return output

@@ -8,7 +8,7 @@ import argparse
 import config
 
 from network import MLP
-from split import train_test_split
+from utils import train_test_split
 from folds import PurgedKFold
 from optuna import trial
 
