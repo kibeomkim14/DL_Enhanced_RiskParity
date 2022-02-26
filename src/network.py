@@ -27,7 +27,7 @@ class MLP(nn.Module):
 
 class PortfolioLayer(nn.Module):
     def __init__(self, asset_num:int=8, error_adjusted:bool=True):
-        super(self,).__init__()
+        super(PortfolioLayer,self).__init__()
         self.asset_num = asset_num
         if error_adjusted:
             self.input_dim = asset_num * 3
@@ -36,7 +36,7 @@ class PortfolioLayer(nn.Module):
 
         self.layer = nn.Sequential(
                             nn.Linear(self.input_dim,self.asset_num+1), # account for the cash position
-                            nn.Softmax(dim=0)
+                            nn.Softmax(dim=1)
                         )
     
     def forward(self, input):
