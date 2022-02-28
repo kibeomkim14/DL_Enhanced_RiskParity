@@ -2,9 +2,10 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from config import PARA_PATH
+from config import PARAM_PATH
 from network import MLP
 from torch.utils.data import Dataset
+
 
 def train_test_split(data:pd.DataFrame, valid_ratio:float=0.2, train_ratio:float=0.6):
     # we will use 60% of the data as train+val set. this data will be used to tune DL model.
@@ -18,8 +19,8 @@ def train_test_split(data:pd.DataFrame, valid_ratio:float=0.2, train_ratio:float
 
     # Now we create a target for training a DL model. Target will be a future 130-days return of each ETF products.
     # To make a target we look 130 days ahead of the training set. This will be done by shifting the view by 130 days.
-    target_list = ['BNDX_ret130','BND_ret130','VGK_ret130','VNQI_ret130',
-                    'VNQ_ret130','VTI_ret130','VWOB_ret130','VWO_ret130']
+    target_list =  ['AGG_ret130','EEM_ret130','IAU_ret130','IEF_ret130',
+                    'IEV_ret130','ITOT_ret130','IYR_ret130']
     target = data.iloc[130:tr_idx+130][target_list]
 
     # add prefix on columns and reset the
@@ -35,11 +36,12 @@ def train_test_split(data:pd.DataFrame, valid_ratio:float=0.2, train_ratio:float
 
     return trn_features, trn_label, val_features, val_label, te_data
 
+
 def train_test_split2(data:pd.DataFrame, test:bool=True):
     # preprocess the data for training
-    y = data.iloc[130:][['BNDX_ret130','BND_ret130','VGK_ret130','VNQI_ret130','VNQ_ret130','VTI_ret130','VWOB_ret130','VWO_ret130']]
+    y = data.iloc[130:][['AGG_ret130','EEM_ret130','IAU_ret130','IEF_ret130','IEV_ret130','ITOT_ret130','IYR_ret130']]
     y.index = data.index[:-130]
-    X = data.loc[:'2021-08-18'] 
+    X = data.loc[:'2021-08-19'] 
 
     if test:
         # split train and test data
@@ -56,13 +58,14 @@ def train_test_split2(data:pd.DataFrame, test:bool=True):
         tr_X = tr_X.sub(mu).div(std)
         return tr_X, tr_y
 
+
 def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame) -> pd.DataFrame:
     data  = torch.Tensor(feature.values.copy())
     label = torch.Tensor(target.values.copy())
 
     # load trained parameters
     model = MLP()
-    net_params = torch.load(PARA_PATH)['net_state_dict']
+    net_params = torch.load(PARAM_PATH+'forecaster_params.json')['net_state_dict']
     model.load_state_dict(net_params)
     
     # MC Dropout 
@@ -70,11 +73,11 @@ def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame) -> pd.D
     for _ in range(1000):
         predictions.append(model(data).detach())
     predictions = torch.stack(predictions)
-
+    
     # calculate bayesian uncertainty estimates
     exp_returns = predictions.mean(axis=0)
     uncertainty = predictions.std(axis=0)
-    error = (label - exp_returns).abs()
+    error = (predictions - label).abs().mean(axis=0)
 
     # concatenate and append
     meta_features = torch.concat([exp_returns, uncertainty, error], axis=1)
@@ -89,11 +92,13 @@ def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame) -> pd.D
     meta_features.iloc[:,-8:] = meta_features.iloc[:,-8:].ewm(10).mean()
     return meta_features
 
+
 def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
     portfolio_return = (weight * lret).sum(axis=1) - 1
     mean_return = portfolio_return.mean() * torch.tensor(252)
     volatility  = portfolio_return.std() * torch.sqrt(torch.tensor(252))
     return -mean_return/volatility
+
 
 class InvDataset(Dataset):
     def __init__(self, features:torch.Tensor, returns:torch.Tensor):

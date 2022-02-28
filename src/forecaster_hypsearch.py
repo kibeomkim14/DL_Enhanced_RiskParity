@@ -13,7 +13,7 @@ from folds import PurgedKFold
 from optuna import trial
 
 # import feature 
-feature = pd.read_csv(config.DATA_PATH, index_col='Date')
+feature = pd.read_csv(config.DATA_PATH+'features.csv', index_col='Date')
 feature.index = pd.to_datetime(feature.index)
 tr_x, tr_y, val_x, val_y, te_data = train_test_split(feature)
 
@@ -121,4 +121,4 @@ if __name__ == "__main__":
     print(f'Average Training loss : {np.mean(train_losses)}, Test Loss: {test_loss}')
 
     print('saving the network parameters...')
-    torch.save({'net_state_dict':model.state_dict(), 'optimizer_dict':optimizer.state_dict()}, 'models/params.json')
+    torch.save({'net_state_dict':model.state_dict(), 'optimizer_dict':optimizer.state_dict()}, 'models/forecaster_params.json')

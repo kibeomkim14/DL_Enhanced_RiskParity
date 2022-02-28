@@ -6,13 +6,13 @@ class MLP(nn.Module):
         super(MLP, self).__init__()
         
         self.layer = nn.Sequential(
-                            nn.Linear(46,72),
+                            nn.Linear(42,72),
                             nn.Dropout(p=0.5),
-                            nn.Linear(72,48),
+                            nn.Linear(72,72),
                             nn.Dropout(p=0.5),
-                            nn.Linear(48,32),
+                            nn.Linear(72,24),
                             nn.Dropout(p=0.5),
-                            nn.Linear(32,8)
+                            nn.Linear(24,7)
                         )
 
     def weight_init(self):
@@ -35,7 +35,7 @@ class PortfolioLayer(nn.Module):
             self.input_dim = asset_num * 2
 
         self.layer = nn.Sequential(
-                            nn.Linear(self.input_dim,self.asset_num+1), # account for the cash position
+                            nn.Linear(self.input_dim,self.asset_num),
                             nn.Softmax(dim=1)
                         )
     
