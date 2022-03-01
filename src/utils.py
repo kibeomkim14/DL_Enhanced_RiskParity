@@ -7,21 +7,19 @@ from network import MLP
 from torch.utils.data import Dataset
 
 
-def train_test_split(data:pd.DataFrame, valid_ratio:float=0.2, train_ratio:float=0.6):
+def train_test_split(data:pd.DataFrame, train_ratio:float=0.6, valid_ratio:float=0.9):
     # we will use 60% of the data as train+val set. this data will be used to tune DL model.
     n = data.shape[0]
     tr_idx  = int(n * train_ratio)
-    val_idx = int(tr_idx * (1-valid_ratio))
+    val_idx = int(tr_idx * valid_ratio)
 
     # split the dataset according to tr index
     tr_data = data.iloc[:tr_idx]
-    te_data = data.iloc[tr_idx:]
 
     # Now we create a target for training a DL model. Target will be a future 130-days return of each ETF products.
     # To make a target we look 130 days ahead of the training set. This will be done by shifting the view by 130 days.
-    target_list =  ['AGG_ret130','EEM_ret130','IAU_ret130','IEF_ret130',
-                    'IEV_ret130','ITOT_ret130','IYR_ret130']
-    target = data.iloc[130:tr_idx+130][target_list]
+    target_list =  ['AGG_ret020','EEM_ret020','IAU_ret020','IEF_ret020','IEV_ret020','ITOT_ret020','IYR_ret020']
+    target = data.iloc[20:tr_idx+20][target_list]
 
     # add prefix on columns and reset the
     target = target.add_prefix('targ_')
@@ -31,22 +29,21 @@ def train_test_split(data:pd.DataFrame, valid_ratio:float=0.2, train_ratio:float
     mu, std = tr_data.mean(axis=0), tr_data.std(axis=0)
     tr_data = tr_data.sub(mu).div(std) # normalize the data along rows
 
-    trn_features, trn_label = tr_data.iloc[:val_idx-130], target.iloc[:val_idx-130] # cut last few days of data to prevent data leakage.
+    trn_features, trn_label = tr_data.iloc[:val_idx-20], target.iloc[:val_idx-20] # cut last few days of data to prevent data leakage.
     val_features, val_label = tr_data.iloc[val_idx:], target.iloc[val_idx:]
-
-    return trn_features, trn_label, val_features, val_label, te_data
+    return trn_features, trn_label, val_features, val_label
 
 
 def train_test_split2(data:pd.DataFrame, test:bool=True):
     # preprocess the data for training
-    y = data.iloc[130:][['AGG_ret130','EEM_ret130','IAU_ret130','IEF_ret130','IEV_ret130','ITOT_ret130','IYR_ret130']]
-    y.index = data.index[:-130]
-    X = data.loc[:'2021-08-19'] 
+    y = data.iloc[20:][['AGG_ret020','EEM_ret020','IAU_ret020','IEF_ret020','IEV_ret020','ITOT_ret020','IYR_ret020']]
+    y.index = data.index[:-20]
+    X = data.iloc[:-20] 
 
     if test:
         # split train and test data
-        tr_X, tr_y = X.loc[:'2016-02-22'], y.loc[:'2016-02-22']
-        te_X, te_y = X.loc['2016-02-23':], y.loc['2016-02-23':]
+        tr_X, tr_y = X.loc[:'2015-09-21'], y.loc[:'2015-09-21']
+        te_X, te_y = X.loc['2015-09-22':], y.loc['2015-09-22':]
 
         # normalize the inputs
         mu, std = tr_X.mean(axis=0), tr_X.std(axis=0)
@@ -59,7 +56,7 @@ def train_test_split2(data:pd.DataFrame, test:bool=True):
         return tr_X, tr_y
 
 
-def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame) -> pd.DataFrame:
+def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame, num_trials=60) -> pd.DataFrame:
     data  = torch.Tensor(feature.values.copy())
     label = torch.Tensor(target.values.copy())
 
@@ -70,7 +67,7 @@ def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame) -> pd.D
     
     # MC Dropout 
     predictions = []
-    for _ in range(1000):
+    for _ in range(num_trials):
         predictions.append(model(data).detach())
     predictions = torch.stack(predictions)
     

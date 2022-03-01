@@ -15,7 +15,7 @@ from optuna import trial
 # import feature 
 feature = pd.read_csv(config.DATA_PATH+'features.csv', index_col='Date')
 feature.index = pd.to_datetime(feature.index)
-tr_x, tr_y, val_x, val_y, te_data = train_test_split(feature)
+tr_x, tr_y, val_x, val_y = train_test_split(feature)
 
 
 def objective(trial: optuna.Trial) -> float:
@@ -32,7 +32,7 @@ def objective(trial: optuna.Trial) -> float:
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, eps=EPSILON)
 
-    t1 = pd.Series(feature[130:tr_x.shape[0] +130].index, index=tr_x.index) # look ahead of 130 days
+    t1 = pd.Series(feature[20:tr_x.shape[0]+20].index, index=tr_x.index) # look ahead of 130 days
     cv = PurgedKFold(n_splits=5, t1=t1, pctEmbargo=0.05) 
 
     train_losses = []
@@ -88,17 +88,18 @@ if __name__ == "__main__":
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(params=model.parameters(), lr=default_params['learning rate'], weight_decay=default_params['weight decay'], eps=default_params['epsilon'])
 
-    t1 = pd.Series(feature[130:tr_x.shape[0] +130].index, index=tr_x.index) # look ahead of 130 days
+    t1 = pd.Series(feature[20:tr_x.shape[0]+20].index, index=tr_x.index) # look ahead of 130 days
     cv = PurgedKFold(n_splits=5, t1=t1, pctEmbargo=0.05) 
 
     train_losses = []
     for fold_idx, (tr, val) in enumerate(cv.split(tr_x)): # 5-fold Purged Cross Validation
+        model.train()
         # assign training set and validation set of CV scheme
         x_train, y_train = torch.Tensor(tr_x.values[tr]), torch.Tensor(tr_y.values[tr])
         x_valid, y_valid = torch.Tensor(tr_x.values[val]), torch.Tensor(tr_y.values[val])
         
         # for each epoch train and update the network
-        for epoch in range(100):
+        for epoch in range(50):
             optimizer.zero_grad()
             
             # get prediction and its loss with gradients
@@ -110,12 +111,14 @@ if __name__ == "__main__":
             optimizer.step()
             
         # validate model
+        model.eval()
         output = model(x_valid)
         valid_loss = loss_fn(output, y_valid)  
         train_losses.append(valid_loss.detach().item())  
-
+    
     # after training and CV
     x_test, y_test = torch.Tensor(val_x.values), torch.Tensor(val_y.values)
+    model.eval()
     output = model(x_test).detach()
     test_loss = loss_fn(output, y_test)
     print(f'Average Training loss : {np.mean(train_losses)}, Test Loss: {test_loss}')
