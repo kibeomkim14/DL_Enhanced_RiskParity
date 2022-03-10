@@ -5,3 +5,4 @@ gym
 ipykernel
 matplotlib
 sklearn
+statsmodels
