@@ -4,246 +4,96 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch import optim
-from tqdm import trange
+from typing import Optional, Tuple
 
 
-
-class MLP(nn.Module):
-    def __init__(self):
-        super(MLP, self).__init__()
-        
-        self.layer = nn.Sequential(
-                            nn.Linear(42,72),
-                            nn.Dropout(p=0.5),
-                            nn.Linear(72,72),
-                            nn.Dropout(p=0.5),
-                            nn.Linear(72,24),
-                            nn.Dropout(p=0.5),
-                            nn.Linear(24,7)
-                        )
-
-    def weight_init(self):
-        for layer in self.layer:
-            if isinstance(layer,nn.Linear):
-                nn.init.xavier_normal_(layer.weight)
-                
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
-        output = self.layer(x)
-        return output
-
-
-
-class Encoder(nn.Module):
-    def __init__(self, input_size:int, hidden_size:int, batch_size:int, num_layers:int=1):
-        '''
-        : param input_size:     the number of features in the input X
-        : param hidden_size:    the number of features in the hidden state h
-        : param num_layers:     number of recurrent layers (i.e., 2 means there are
-        :                       2 stacked LSTMs)
-        '''
-        super(Encoder, self).__init__()
-        self.input_size  = input_size
-        self.hidden_size = hidden_size
-        self.batch_size  = batch_size
-        self.num_layers  = num_layers
-        self.lstm = nn.LSTM(input_size = input_size, hidden_size = hidden_size, num_layers = num_layers)
-
-    def forward(self, x_input):
-        lstm_out, self.hidden = self.lstm(x_input.view(x_input.size(0), x_input.size(1), self.input_size))
-        return lstm_out, self.hidden     
-    
-    def init_weight(self, ):
-        
-        '''
-        initialize hidden state
-        : param batch_size:    x_input.shape[1]
-        : return:              zeroed hidden state and cell state 
-        '''
-        
-        return (torch.zeros(self.num_layers, self.batch_size, self.hidden_size),
-                torch.zeros(self.num_layers, self.batch_size, self.hidden_size))
-
-
-class Decoder(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers = 1):
-        super(Decoder, self).__init__()
-        self.input_size  = input_size
-        self.hidden_size = hidden_size
-        self.num_layers  = num_layers
-
-        self.lstm = nn.LSTM(input_size = input_size, hidden_size = hidden_size,
-                            num_layers = num_layers)
-        self.linear = nn.Linear(hidden_size, input_size)           
-
-    def forward(self, x_input, encoder_hidden_states):
-        lstm_out, self.hidden = self.lstm(x_input.unsqueeze(0), encoder_hidden_states)
-        output = self.linear(lstm_out.squeeze(0))     
-        return output, self.hidden
-
-
-class lstm_seq2seq(nn.Module):
-    ''' train LSTM encoder-decoder and make predictions '''
-    
-    def __init__(self, input_size, hidden_size):
-
-        '''
-        : param input_size:     the number of expected features in the input X
-        : param hidden_size:    the number of features in the hidden state h
-        '''
-
-        super(lstm_seq2seq, self).__init__()
-
+class MultiVariateGP(nn.Module):
+    def __init__(self, input_size:int, rank_size:int):
+        super(MultiVariateGP,self).__init__()
         self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.rank_size  = rank_size
 
-        self.encoder = Encoder(input_size = input_size, hidden_size = hidden_size)
-        self.decoder = Decoder(input_size = input_size, hidden_size = hidden_size)
+        # define linear weight for calculating parameters of gaussian process
+        # these weights are SHARED across all time series.
+        self.layer_m = nn.Linear(input_size, 1) # mean 
+        self.layer_d = nn.Linear(input_size, rank_size) # diagonal point
+        self.layer_v = nn.Sequential(
+                                        nn.Linear(input_size, 1),
+                                        nn.Softplus(beta=1)
+                                    ) # volatility
+
+    def forward(self, h_t:torch.Tensor):
+        m_t = self.layer_m(h_t)
+        d_t = self.layer_d(h_t)
+        v_t = self.layer_v(h_t)
+        return m_t, d_t, v_t
 
 
-    def train_model(self, input_tensor, target_tensor, n_epochs, target_len, batch_size, training_prediction = 'recursive', teacher_forcing_ratio = 0.5, learning_rate = 0.01, dynamic_tf = False):
+class GPCopulaRNN(nn.Module):
+    def __init__(
+        self, 
+        input_size:int, 
+        hidden_size:int, 
+        num_layers:int, 
+        batch_size:int,
+        num_asset:int,
+        rank_size:int,
+        dropout:float=0.1,
+        batch_first:bool=False,
+        features:Optional[dict]=None 
+    ):
+        super(GPCopulaRNN,self).__init__()
+        self.input_size   = input_size
+        self.hidden_size  = hidden_size
+        self.batch_size   = batch_size
+        self.num_asset    = num_asset
+        self.num_layers   = num_layers
+        self.batch_first  = batch_first
+        self.feature_size = len(features[0]) if features is not None else 0
+        self.features = features
+        self.hidden   = None
         
-        '''
-        train lstm encoder-decoder
+        # local lstm
+        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                             num_layers=num_layers, batch_first=batch_first, dropout=dropout)
         
-        : param input_tensor:              input data with shape (seq_len, # in batch, number features); PyTorch tensor    
-        : param target_tensor:             target data with shape (seq_len, # in batch, number features); PyTorch tensor
-        : param n_epochs:                  number of epochs 
-        : param target_len:                number of values to predict 
-        : param batch_size:                number of samples per gradient update
-        : param training_prediction:       type of prediction to make during training ('recursive', 'teacher_forcing', or
-        :                                  'mixed_teacher_forcing'); default is 'recursive'
-        : param teacher_forcing_ratio:     float [0, 1) indicating how much teacher forcing to use when
-        :                                  training_prediction = 'teacher_forcing.' For each batch in training, we generate a random
-        :                                  number. If the random number is less than teacher_forcing_ratio, we use teacher forcing.
-        :                                  Otherwise, we predict recursively. If teacher_forcing_ratio = 1, we train only using
-        :                                  teacher forcing.
-        : param learning_rate:             float >= 0; learning rate
-        : param dynamic_tf:                use dynamic teacher forcing (True/False); dynamic teacher forcing
-        :                                  reduces the amount of teacher forcing for each epoch
-        : return losses:                   array of loss function for each epoch
-        '''
+        # Multivariate Gaussian Process
+        self.gp = MultiVariateGP(input_size=hidden_size + self.feature_size, rank_size=rank_size)
+
+    def init_weight(self) -> None:
+        h0, c0 = torch.zeros(self.num_layers, self.num_asset, self.hidden_size),\
+                    torch.zeros(self.num_layers, self.num_asset, self.hidden_size)
+        self.hidden = (h0, c0)
+
+    def feature_selector(self, indices:torch.Tensor, time_steps:int) -> torch.Tensor:
+        feature = []
+        for idx in indices:
+            feature.append(self.features[idx.item()].repeat(time_steps,1))
+        feature = torch.stack(feature, axis=1)
+        return feature
+
+    def forward(self, z_t:torch.Tensor, pred:bool=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert len(z_t.size()) == 2, 'input tensor dimension is not equal to 2.'
+        z_t = z_t.unsqueeze(2)
+
+        # select the batch then pass it through the unrolled LSTM
+        # timestep x num_batch x 1
+        output, (hn, cn) = self.lstm(z_t, self.hidden)
+        self.hidden = (hn.detach(), cn.detach())
         
-        # initialize array of losses 
-        losses = np.full(n_epochs, np.nan)
-
-        optimizer = optim.Adam(self.parameters(), lr = learning_rate)
-        criterion = nn.MSELoss()
-
-        # calculate number of batch iterations
-        n_batches = int(input_tensor.shape[1] / batch_size)
-
-        with trange(n_epochs) as tr:
-            for it in tr:
-                
-                batch_loss = 0.
-                batch_loss_tf = 0.
-                batch_loss_no_tf = 0.
-                num_tf = 0
-                num_no_tf = 0
-
-                for b in range(n_batches):
-                    # select data 
-                    input_batch = input_tensor[:, b: b + batch_size, :]
-                    target_batch = target_tensor[:, b: b + batch_size, :]
-
-                    # outputs tensor
-                    outputs = torch.zeros(target_len, batch_size, input_batch.shape[2])
-
-                    # initialize hidden state
-                    encoder_hidden = self.encoder.init_hidden(batch_size)
-
-                    # zero the gradient
-                    optimizer.zero_grad()
-
-                    # encoder outputs
-                    encoder_output, encoder_hidden = self.encoder(input_batch)
-
-                    # decoder with teacher forcing
-                    decoder_input = input_batch[-1, :, :]   # shape: (batch_size, input_size)
-                    decoder_hidden = encoder_hidden
-
-                    if training_prediction == 'recursive':
-                        # predict recursively
-                        for t in range(target_len): 
-                            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-                            outputs[t] = decoder_output
-                            decoder_input = decoder_output
-
-                    if training_prediction == 'teacher_forcing':
-                        # use teacher forcing
-                        if random.random() < teacher_forcing_ratio:
-                            for t in range(target_len): 
-                                decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-                                outputs[t] = decoder_output
-                                decoder_input = target_batch[t, :, :]
-
-                        # predict recursively 
-                        else:
-                            for t in range(target_len): 
-                                decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-                                outputs[t] = decoder_output
-                                decoder_input = decoder_output
-
-                    if training_prediction == 'mixed_teacher_forcing':
-                        # predict using mixed teacher forcing
-                        for t in range(target_len):
-                            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-                            outputs[t] = decoder_output
-                            
-                            # predict with teacher forcing
-                            if random.random() < teacher_forcing_ratio:
-                                decoder_input = target_batch[t, :, :]
-                            
-                            # predict recursively 
-                            else:
-                                decoder_input = decoder_output
-
-                    # compute the loss 
-                    loss = criterion(outputs, target_batch)
-                    batch_loss += loss.item()
-                    
-                    # backpropagation
-                    loss.backward()
-                    optimizer.step()
-
-                # loss for epoch 
-                batch_loss /= n_batches 
-                losses[it] = batch_loss
-
-                # dynamic teacher forcing
-                if dynamic_tf and teacher_forcing_ratio > 0:
-                    teacher_forcing_ratio = teacher_forcing_ratio - 0.02 
-
-                # progress bar 
-                tr.set_postfix(loss="{0:.3f}".format(batch_loss))
-                    
-        return losses
-
-    def predict(self, input_tensor, target_len):
+        # we only use the subset of batch for training
+        # else return all indices
+        if pred:
+            batch_indices = torch.arange(self.num_asset)
+        else:
+            batch_indices = torch.randperm(self.num_asset)[:self.batch_size]
         
-        '''
-        : param input_tensor:      input data (seq_len, input_size); PyTorch tensor 
-        : param target_len:        number of target values to predict 
-        : return np_outputs:       np.array containing predicted values; prediction done recursively 
-        '''
+        # find feature vector e_i for each asset i then concatenate it with LSTM output.
+        e = self.feature_selector(batch_indices, z_t.size(0))
+        y_t = torch.concat([output[:,batch_indices,:], e], axis=2)
 
-        # encode input_tensor
-        input_tensor = input_tensor.unsqueeze(1)     # add in batch size of 1
-        encoder_output, encoder_hidden = self.encoder(input_tensor)
-
-        # initialize tensor for predictions
-        outputs = torch.zeros(target_len, input_tensor.shape[2])
-
-        # decode input_tensor
-        decoder_input = input_tensor[-1, :, :]
-        decoder_hidden = encoder_hidden
-        
-        for t in range(target_len):
-            decoder_output, decoder_hidden = self.decoder(decoder_input, decoder_hidden)
-            outputs[t] = decoder_output.squeeze(0)
-            decoder_input = decoder_output
-            
-        np_outputs = outputs.detach().numpy()
-        
-        return np_outputs
+        # get GP parameters
+        # calculate parameters of multivariate gaussian process for each time t
+        mu_t, v_t, d_t = self.gp(y_t)
+        cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
+        return mu_t, cov_t, batch_indices
