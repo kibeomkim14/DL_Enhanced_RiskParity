@@ -70,8 +70,8 @@ class GPCopulaRNN(nn.Module):
         return feature
 
     def forward(self, z_t:torch.Tensor, pred:bool=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert len(z_t.size()) == 2, 'input tensor dimension is not equal to 2.'
-        z_t = z_t.unsqueeze(2)
+        if len(z_t.size()) == 2:
+            z_t = z_t.unsqueeze(2)
 
         # select the batch then pass it through the unrolled LSTM
         # timestep x num_batch x 1

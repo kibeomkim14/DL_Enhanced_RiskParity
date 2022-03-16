@@ -6,11 +6,12 @@ import pandas as pd
 import numpy as np
 import argparse
 import config
+import json 
 
 from optuna import trial
+from torch.optim import Adam
 from network import GPCopulaRNN
-from utils import train_test_split, transform, inv_transform, \
-                    gaussian_loss, train_idx_sampler
+from utils import transform, inv_transform, gaussian_loss, train_idx_sampler
 
 # import feature 
 prices = pd.read_csv(config.DATA_PATH+'/prices.csv', index_col='Date')
@@ -21,13 +22,20 @@ prices = prices.resample('M').last()
 lret_m = np.log(prices/prices.shift(1)).fillna(0.0) # weekly return
 
 
-def train(model, data, optimizer, num_samples, num_epochs, save=False):
+def train(
+        model:nn.Module, 
+        data:torch.Tensor, 
+        optimizer:torch.optim.Optimizer, 
+        num_samples:int,
+        num_epochs:int
+    ) -> torch.Tensor:
+
     model.init_weight()
 
     # transform 
     X_tr, cdfs = transform(data)
     sampler = train_idx_sampler(tr_idx=data.size(0), context_len=12, 
-                                    prediction_len=1, num_samples=num_samples)
+                                prediction_len=1, num_samples=num_samples)
         
     for epoch in range(num_epochs):
         # randomly sample sequence index for training
@@ -48,23 +56,24 @@ def train(model, data, optimizer, num_samples, num_epochs, save=False):
             # append loss of each batch
             losses.append(loss.detach())
 
-            # prediction step
-            mu_pred, _, _ = model(data[te_idx], pred=True)
-            Z_tr_hat = inv_transform(mu_pred.detach(), cdfs)
-            
+            with torch.no_grad():
+                # run the model
+                mu_t, _, _ = model(data[tr_idx], pred=True)
+                z_hat = inv_transform(mu_t[-1], cdfs)
+                
+                # prediction step using last time-step prediction
+                mu_pred, _, _ = model(z_hat.unsqueeze(0), pred=True)
+                Z_tr_hat = inv_transform(mu_pred.detach(), cdfs)
+                
             # calculate validation loss
             losses_valid = losses_valid + (Z_tr_hat[0]- data[te_idx]).pow(2).sum()
 
-        losses_valid = losses_valid[0]/num_samples
-        if epoch % 50 == 0:
+        losses_valid = losses_valid.item()/num_samples
+        if epoch+1 % 25 == 0:
             print(f'Epoch {epoch+1}') 
             print(f'Gaussian LL Loss : {np.round(np.mean(losses),2)}')
             print(f'Validation MSE   : {losses_valid} \n')
-    if save:
-        torch.save({'networks_params':model.state_dict(), 'optimizer_dict':optimizer.state_dict()}, 'models/GaussCopula.json')
-    
     return losses_valid
-
 
 
 def objective(trial: optuna.Trial) -> float:
@@ -74,17 +83,17 @@ def objective(trial: optuna.Trial) -> float:
     
     # define the GP-Copula model and initialize the weight
     # set up the loss function and optimizer
-    model = GPCopulaRNN(input_size=1, hidden_size=4, num_layers=2, rank_size=4, 
-                        batch_size=3, num_asset=7, dropout=0.05, features=config.e_dict)
+    model = GPCopulaRNN(input_size=1, hidden_size=4, num_layers=2, rank_size=5, 
+                        batch_size=3, num_asset=7, dropout=0.1, features=config.e_dict)
+    optimizer = Adam(params=model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
-    optimizer = torch.optim.Adam(params=model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    num_epochs  = 200
-    num_samples = 30
-
-    # convert the data to torch tensor
+    # convert the data to torch tensor (70% train)
     split_idx = int(lret_m.shape[0] * 0.7)
-    Z_tr, _ = torch.Tensor(lret_m.iloc[:split_idx].values), torch.Tensor(lret_m.iloc[split_idx:].values)
-    losses_valid = train(model, Z_tr, optimizer, num_samples, num_epochs)
+    Z_tr = torch.Tensor(lret_m.iloc[:split_idx].values)
+
+    # train the model and store network parameters in Trial user attribute
+    losses_valid = train(model, Z_tr, optimizer, config.NUM_SAMPLES, config.NUM_EPOCHS)
+    trial.set_user_attr('net_params', {'net_params':model.state_dict()})
     return losses_valid
 
 
@@ -98,7 +107,13 @@ if __name__ == "__main__":
 
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=args.n_trials)
-    params = study.best_trial.params
-
+    
     print('Hyperparameter search complete. ')
-    print(params)
+    
+    # store parameters
+    parameters = study.best_trial.user_attrs['net_params']
+    hyp_params = study.best_trial.params
+    parameters['hyp_params'] = hyp_params
+    
+    print('saving parameters...')
+    torch.save(parameters, 'models/GaussCopula.pt')
