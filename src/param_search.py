@@ -11,7 +11,7 @@ import json
 from optuna import trial
 from torch.optim import Adam
 from network import GPCopulaRNN
-from utils import transform, inv_transform, gaussian_loss, train_idx_sampler
+from utils import transform, inv_transform, gaussian_loss, sequence_sampler
 
 # import feature 
 prices = pd.read_csv(config.DATA_PATH+'/prices.csv', index_col='Date')
@@ -34,7 +34,7 @@ def train(
 
     # transform 
     X_tr, cdfs = transform(data)
-    sampler = train_idx_sampler(tr_idx=data.size(0), context_len=12, 
+    sampler = sequence_sampler(tr_idx=data.size(0), context_len=12, 
                                 prediction_len=1, num_samples=num_samples)
         
     for epoch in range(num_epochs):
@@ -75,7 +75,29 @@ def train(
             print(f'Validation MSE   : {losses_valid} \n')
     return losses_valid
 
-
+def test(model: nn.Module,
+         data: torch.Tensor, 
+         cdfs:dict
+        ) -> torch.Tensor:
+    loss = torch.Tensor([0.0])
+    count = 0
+    for i in range(6,data.size(0)):
+        z, z_targ = data[i-6:i], data[i:i+1]    
+        count += 1
+        with torch.no_grad():
+            # run the model
+            mu_t, _, _ = model(z, pred=True)
+            z_hat = inv_transform(mu_t[-1], cdfs)
+        
+            # use sampled z hat for next step prediction
+            mu_pred, _, _ = model(z_hat.unsqueeze(0), pred=True)
+            Z_tr_hat = inv_transform(mu_pred.detach(), cdfs)
+        
+        loss = loss + (Z_tr_hat - z_targ).pow(2).sum()
+    loss = loss/count
+    print(f'Prediction MSE : {loss}')
+    return loss
+    
 def objective(trial: optuna.Trial) -> float:
     # set up the parameter using optuna
     LEARNING_RATE = trial.suggest_float("learning rate",1e-6,5e-3,log=True)

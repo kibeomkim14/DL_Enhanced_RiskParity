@@ -3,7 +3,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from config import PARAM_PATH
+from config import PARAM_PATH, DATA_PATH
 from scipy.stats import norm
 from network import GPCopulaRNN
 from typing import Optional, Tuple
@@ -33,6 +33,14 @@ def train_test_split(data:pd.DataFrame, test:bool=True):
         tr_X = tr_X.sub(mu).div(std)
         return tr_X, tr_y
 
+def load_data() -> Tuple[pd.DataFrame,pd.DataFrame]:
+    # import feature 
+    prices = pd.read_csv(DATA_PATH+'/prices.csv', index_col='Date')
+
+    # preprocess weekly data
+    prices.index = pd.to_datetime(prices.index)
+    prices_m = prices.resample('M').last()
+    return prices, prices_m
 
 def transform(Z:torch.Tensor, cdfs:Optional[dict]=None) -> Tuple[torch.Tensor,dict]:
     """
@@ -134,9 +142,36 @@ def inv_transform(X:torch.Tensor, cdfs:dict) -> pd.DataFrame:
     return Z
 
 
-def train_idx_sampler(tr_idx:int, context_len:int, prediction_len:int, num_samples:int) -> list:
+def train_test_split(data_monthly:pd.DataFrame, split_ratio:float=0.7) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,dict]:
     """
-    Given a traini index (a point), with context length and prediction length, this function samples a sequence of length 
+    학습 데이터와 시험 데이터를 나눠주는 함수입니다. split_ratio 를 이용해서 원하는 비율로 나눌 수 있습니다.
+    splits a dataset into train and test sets given a split ratio.
+
+    INPUT
+        data_monthly: pd.DataFrame
+            monthly price of assets
+        split_ratio: float
+            specifies the ratio of train set over the whole.
+    RETURNS
+        Z_tr, Z_te, X_tr, X_te: Tuple[torch.tensor...]
+            returns train & test monthly return data, raw and transformed
+        cdf: dict
+            dictionary containing a number of empirical CDFs.    
+    """
+    # monthly return
+    lret_m = np.log(data_monthly/data_monthly.shift(1)).fillna(0.0) 
+
+    # convert the data to torch tensor
+    split_idx = int(lret_m.shape[0] * split_ratio)
+    Z_tr, Z_te = torch.Tensor(lret_m.iloc[:split_idx].values), torch.Tensor(lret_m.iloc[split_idx:].values)
+    X_tr, cdf = transform(Z_tr)
+    X_te, _   = transform(Z_te, cdf)
+    return Z_tr, Z_te, X_tr, X_te, cdf
+
+
+def sequence_sampler(tr_idx:int, context_len:int, prediction_len:int, num_samples:int) -> list:
+    """
+    Given a train index (a point), with context length and prediction length, this function samples a sequence of length 
     context_len + prediction_len for 'num_samples' times.
     
     INPUTS
@@ -160,7 +195,7 @@ def train_idx_sampler(tr_idx:int, context_len:int, prediction_len:int, num_sampl
     return sample_indices
 
 
-def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame, num_trials=60) -> pd.DataFrame:
+def generate_portfolio_inputs(feature:pd.DataFrame, target:pd.DataFrame, num_trials:int=60) -> pd.DataFrame:
     data  = torch.Tensor(feature.values.copy())
     label = torch.Tensor(target.values.copy())
 
@@ -205,7 +240,7 @@ def gaussian_loss(x:torch.Tensor, mu_t:torch.Tensor, cov_t:torch.Tensor) -> torc
     if len(mu_t.size()) == 3:
         mu_t = mu_t.squeeze(2)
 
-    # set a mul;tivariate distribution indexed by time t
+    # set a multivariate distribution indexed by time t
     # loc: batch_size x dim, cov: batch_size x dim x dim
     # input x: batch_size x dim
     distribution_t = MultivariateNormal(mu_t, cov_t)
@@ -219,19 +254,6 @@ def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
     volatility  = portfolio_return.std() * torch.sqrt(torch.tensor(252))
     return -mean_return/volatility
 
-
-class InvDataset(Dataset):
-    def __init__(self, features:torch.Tensor, returns:torch.Tensor):
-        self.features = features
-        self.returns  = returns
-
-    def __len__(self) -> int:
-        return self.features.size(0)
-    
-    def __getitem__(self, idx):
-        X_selected = self.features[idx]
-        y_selected = self.returns[idx]
-        return X_selected, y_selected
 
 
 class ECDF_(object):

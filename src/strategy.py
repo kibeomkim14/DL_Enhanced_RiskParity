@@ -5,12 +5,11 @@ from scipy.optimize import minimize, Bounds, LinearConstraint
 
 
 class RiskParity:
-    def __init__(self, data:pd.DataFrame, dropout:pd.DataFrame, bound:list = [0, np.inf]):
+    def __init__(self, data:pd.DataFrame, bound:list = [0, np.inf]):
         self.data = {}
         self.data["price"] = data
         self.data["lret"]  = np.log(data/data.shift(1)).fillna(0)
         self.data["rv"]    = self.data["lret"].add(1)
-        self.data["dropout_feature"] = dropout
         self.num_assets = self.data["price"].shape[1]
 
         # portoflio weight and performance dataframes which are to be filled.
@@ -76,42 +75,3 @@ class RiskParity:
         df_mean = df_profit_history.rolling(252).mean() * 252
         df_std = df_profit_history.rolling(252).std() * np.sqrt(252)
         self.annual_sharpe = (df_mean)/(df_std)
-
-    def adjust_b(self):
-        exp_return  = self.data["dropout_feature"].iloc[:,:7]
-        uncertainty = self.data["dropout_feature"].iloc[:,7:14]
-
-        confidence = (exp_return/uncertainty.values) * (exp_return > 0) * 1
-        confidence = confidence.where(confidence>0 ,0)
-
-        b = confidence + np.repeat([1/7],7)
-        b = b/b.sum(axis=1).values.reshape(-1,1)
-        return b
-
-
-def tactical_allocation(allocation:pd.DataFrame, features:pd.DataFrame, threshold:float=0.025) -> pd.DataFrame: 
-    assert allocation.shape[0] == features.shape[0], 'allocation and features table length are not equal.'
-    exp_return  = features.iloc[:,:7] 
-    uncertainty = features.iloc[:,7:14]
-    em_mae = features.iloc[:,14:]
-    
-    # get boolean tables indicating whether asset belongs to high conviction or lower conviction bucket.
-    isHigh = (uncertainty < threshold)
-    isLow  = (uncertainty > threshold)
-
-    # Calculate overweight factor for high conviction assets.
-    F =  isHigh.values * (1 + np.tanh(exp_return/uncertainty.values) ** 2)
-
-    # calculation High conviction (HW) weights
-    hw_weight = allocation * F.values
-    hw_total  = hw_weight.sum(axis=1).where(hw_weight.sum(axis=1) > 1,1)
-    hw_weight = hw_weight/hw_total.values.reshape(-1,1)
-    
-    # calculation Low conviction (LW) weights
-    lw_weight = allocation * (isLow * 1).values
-    lw_total  = lw_weight.sum(axis=1).where(lw_weight.sum(axis=1) > 0.0,1)
-    lw_weight = lw_weight/lw_total.values.reshape(-1,1)
-    lw_total  = 1 - hw_weight.sum(axis=1) # Low conviction total is just 1 minus hw total.
-    lw_weight = lw_weight * lw_total.values.reshape(-1,1)
-    ta_weight = hw_weight + lw_weight
-    return ta_weight
