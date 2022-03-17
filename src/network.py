@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
+from config import E_DICT
 
 
 class MultiVariateGP(nn.Module):
@@ -35,9 +36,9 @@ class GPCopulaRNN(nn.Module):
         batch_size:int,
         num_asset:int,
         rank_size:int,
+        cdfs:dict,
         dropout:float=0.1,
         batch_first:bool=False,
-        features:Optional[dict]=None 
     ):
         super(GPCopulaRNN,self).__init__()
         self.input_size   = input_size
@@ -46,9 +47,11 @@ class GPCopulaRNN(nn.Module):
         self.num_asset    = num_asset
         self.num_layers   = num_layers
         self.batch_first  = batch_first
-        self.feature_size = len(features[0]) if features is not None else 0
-        self.features = features
-        self.hidden   = None
+        self.distribution = cdfs
+        self.features     = E_DICT
+        self.feature_size = len(self.features[0])
+        self.hidden = None
+
         
         # local lstm
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
@@ -94,3 +97,16 @@ class GPCopulaRNN(nn.Module):
         mu_t, v_t, d_t = self.gp(y_t)
         cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
         return mu_t, cov_t, batch_indices
+
+    def predict(self, z_t:torch.Tensor, num_samples:Optional[int]=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if len(z_t.size()) == 2:
+            z_t = z_t.unsqueeze(2)
+
+        with torch.no_grad():
+            mu_t, _, _ = self.forward(z_t, pred=True)
+            z_hat = inv_transform(mu_t[-1], self.cdfs)
+        
+            # use sampled z hat for next step prediction
+            mu_pred, _, _ = self.forward(z_hat.unsqueeze(0), pred=True)
+            z_pred = inv_transform(mu_pred.detach(), self.cdfs)
+        return z_pred

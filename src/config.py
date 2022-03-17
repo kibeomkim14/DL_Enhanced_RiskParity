@@ -17,4 +17,4 @@ e5 = torch.Tensor([0,0,0,1,0,1,0,0]) # IYR, us real estates
 e6 = torch.Tensor([0,0,0,0,1,0,0,0]) # IAU, gold
 e7 = torch.Tensor([1,0,0,0,0,1,0,0]) # ITOT, us equities
 
-e_dict = {0: e1, 1: e2, 2: e3, 3: e4, 4: e5, 5: e6, 6: e7}
+E_DICT = {0: e1, 1: e2, 2: e3, 3: e4, 4: e5, 5: e6, 6: e7}
