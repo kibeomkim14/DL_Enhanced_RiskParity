@@ -14,7 +14,9 @@ class MultiVariateGP(nn.Module):
         # define linear weight for calculating parameters of gaussian process
         # these weights are SHARED across all time series.
         self.layer_m = nn.Linear(input_size, 1) # mean 
+
         self.layer_d = nn.Linear(input_size, rank_size) # diagonal point
+                                    
         self.layer_v = nn.Sequential(
                                         nn.Linear(input_size, 1),
                                         nn.Softplus(beta=1)
@@ -27,7 +29,8 @@ class MultiVariateGP(nn.Module):
         return m_t, d_t, v_t
 
 
-class GPCopulaRNN(nn.Module):
+
+class GP_RNN(nn.Module):
     def __init__(
         self, 
         input_size:int, 
@@ -36,23 +39,20 @@ class GPCopulaRNN(nn.Module):
         batch_size:int,
         num_asset:int,
         rank_size:int,
-        cdfs:dict,
         dropout:float=0.1,
         batch_first:bool=False,
     ):
-        super(GPCopulaRNN,self).__init__()
+        super(GP_RNN,self).__init__()
         self.input_size   = input_size
         self.hidden_size  = hidden_size
         self.batch_size   = batch_size
         self.num_asset    = num_asset
         self.num_layers   = num_layers
         self.batch_first  = batch_first
-        self.distribution = cdfs
         self.features     = E_DICT
         self.feature_size = len(self.features[0])
         self.hidden = None
 
-        
         # local lstm
         self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
                              num_layers=num_layers, batch_first=batch_first, dropout=dropout)
@@ -98,15 +98,110 @@ class GPCopulaRNN(nn.Module):
         cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
         return mu_t, cov_t, batch_indices
 
-    def predict(self, z_t:torch.Tensor, num_samples:Optional[int]=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict(self, z_t:torch.Tensor, num_samples:int=1) -> Tuple[torch.Tensor, torch.Tensor]:
         if len(z_t.size()) == 2:
             z_t = z_t.unsqueeze(2)
 
+        zs = []
         with torch.no_grad():
-            mu_t, _, _ = self.forward(z_t, pred=True)
-            z_hat = inv_transform(mu_t[-1], self.cdfs)
+            for _ in range(num_samples):
+                mu_t, _, _ = self.forward(z_t, pred=True)
+                # use sampled z hat for next step prediction
+                z_pred, _, _ = self.forward(mu_t[-1].unsqueeze(0), pred=True)
+                zs.append(z_pred)
+        zs = torch.stack(zs)
+        z_mean, z_std = zs.mean(axis=0), zs.std(axis=0)
+        return z_mean, z_std
+
+
+
+class GPCopulaRNN(nn.Module):
+    def __init__(
+        self, 
+        input_size:int, 
+        hidden_size:int, 
+        num_layers:int, 
+        batch_size:int,
+        num_asset:int,
+        rank_size:int,
+        cdfs:dict,
+        dropout:float=0.1,
+        batch_first:bool=False,
+    ):
+        super(GPCopulaRNN,self).__init__()
+        self.input_size   = input_size
+        self.hidden_size  = hidden_size
+        self.batch_size   = batch_size
+        self.num_asset    = num_asset
+        self.num_layers   = num_layers
+        self.batch_first  = batch_first
+        self.distribution = cdfs
+        self.features     = E_DICT
+        self.feature_size = len(self.features[0])
+        self.hidden = None
+
         
-            # use sampled z hat for next step prediction
-            mu_pred, _, _ = self.forward(z_hat.unsqueeze(0), pred=True)
-            z_pred = inv_transform(mu_pred.detach(), self.cdfs)
-        return z_pred
+        # local lstm
+        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
+                             num_layers=num_layers, batch_first=batch_first, dropout=dropout)
+        
+        # Multivariate Gaussian Process
+        self.gp = MultiVariateGP(input_size=hidden_size + self.feature_size, rank_size=rank_size, dropout=dropout)
+
+    def init_weight(self) -> None:
+        h0, c0 = torch.zeros(self.num_layers, self.num_asset, self.hidden_size),\
+                    torch.zeros(self.num_layers, self.num_asset, self.hidden_size)
+        self.hidden = (h0, c0)
+
+    def feature_selector(self, indices:torch.Tensor, time_steps:int) -> torch.Tensor:
+        feature = []
+        for idx in indices:
+            feature.append(self.features[idx.item()].repeat(time_steps,1))
+        feature = torch.stack(feature, axis=1)
+        return feature
+
+    def forward(self, z_t:torch.Tensor, pred:bool=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if len(z_t.size()) == 2:
+            z_t = z_t.unsqueeze(2)
+
+        # select the batch then pass it through the unrolled LSTM
+        # timestep x num_batch x 1
+        output, (hn, cn) = self.lstm(z_t, self.hidden)
+        self.hidden = (hn.detach(), cn.detach())
+        
+        # we only use the subset of batch for training
+        # else return all indices
+        if pred:
+            batch_indices = torch.arange(self.num_asset)
+        else:
+            batch_indices = torch.randperm(self.num_asset)[:self.batch_size]
+        
+        # find feature vector e_i for each asset i then concatenate it with LSTM output.
+        e = self.feature_selector(batch_indices, z_t.size(0))
+        y_t = torch.concat([output[:,batch_indices,:], e], axis=2)
+
+        # get GP parameters
+        # calculate parameters of multivariate gaussian process for each time t
+        mu_t, v_t, d_t = self.gp(y_t)
+        cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
+        return mu_t, cov_t, batch_indices
+
+    def predict(self, z_t:torch.Tensor, num_samples:int=1) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from utils import inv_transform
+        if len(z_t.size()) == 2:
+            z_t = z_t.unsqueeze(2)
+
+        zs = []
+        with torch.no_grad():
+            for _ in range(num_samples):
+                mu_t, _, _ = self.forward(z_t, pred=True)
+                z_hat = inv_transform(mu_t[-1], self.distribution)
+            
+                # use sampled z hat for next step prediction
+                mu_pred, _, _ = self.forward(z_hat.unsqueeze(0), pred=True)
+                z_pred = inv_transform(mu_pred.detach(), self.distribution)
+                zs.append(z_pred)
+
+        zs = torch.stack(zs)
+        z_mean, z_std = zs.mean(axis=0), zs.std(axis=0)
+        return z_mean, z_std

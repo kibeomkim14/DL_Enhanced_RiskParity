@@ -10,16 +10,8 @@ import json
 
 from optuna import trial
 from torch.optim import Adam
-from network import GPCopulaRNN
-from utils import transform, inv_transform, gaussian_loss, sequence_sampler
-
-# import feature 
-prices = pd.read_csv(config.DATA_PATH+'/prices.csv', index_col='Date')
-
-# preprocess weekly data
-prices.index = pd.to_datetime(prices.index)
-prices = prices.resample('M').last()
-lret_m = np.log(prices/prices.shift(1)).fillna(0.0) # weekly return
+from network import GP_RNN, GPCopulaRNN
+from utils import load_data, train_test_split, transform, inv_transform, gaussian_loss, sequence_sampler
 
 
 def train(
@@ -31,90 +23,76 @@ def train(
     ) -> torch.Tensor:
 
     model.init_weight()
+    model.train()
 
-    # transform 
-    X_tr, cdfs = transform(data)
-    sampler = sequence_sampler(tr_idx=data.size(0), context_len=12, 
+    Z_tr, _ = train_test_split(data)
+    Z_train, Z_valid = Z_tr[:int(Z_tr.size(0) * 0.8)], Z_tr[int(Z_tr.size(0) * 0.8)-18:]
+    sampler = sequence_sampler(tr_idx=Z_train.size(0), context_len=18, 
                                 prediction_len=1, num_samples=num_samples)
-        
+    
     for epoch in range(num_epochs):
         # randomly sample sequence index for training
-        losses = []
-        losses_valid = torch.Tensor([0.0])
+        losses_tr = torch.Tensor([0.0])
         for tr_idx, te_idx in sampler: # for each sequence sample
             optimizer.zero_grad()
 
             # run the model
-            mu_t, cov_t, batch_idx = model(data[tr_idx])
-            x = X_tr[tr_idx][:,batch_idx]
+            mu_t, cov_t, batch_idx = model(Z_train[tr_idx])
 
             # gaussian log-likelihood loss
-            loss = gaussian_loss(x, mu_t, cov_t)
+            loss = gaussian_loss(Z_train[tr_idx][:,batch_idx], mu_t, cov_t)
             loss.backward()
             optimizer.step()
             
             # append loss of each batch
-            losses.append(loss.detach())
-
-            with torch.no_grad():
-                # run the model
-                mu_t, _, _ = model(data[tr_idx], pred=True)
-                z_hat = inv_transform(mu_t[-1], cdfs)
-                
-                # prediction step using last time-step prediction
-                mu_pred, _, _ = model(z_hat.unsqueeze(0), pred=True)
-                Z_tr_hat = inv_transform(mu_pred.detach(), cdfs)
-                
+            z_pred, _ = model.predict(Z_train[tr_idx], 1)
+            
             # calculate validation loss
-            losses_valid = losses_valid + (Z_tr_hat[0]- data[te_idx]).pow(2).sum()
+            losses_tr = losses_tr + (z_pred[0].view(-1) - Z_train[te_idx].view(-1)).pow(2).sum()
 
-        losses_valid = losses_valid.item()/num_samples
-        if epoch+1 % 25 == 0:
-            print(f'Epoch {epoch+1}') 
-            print(f'Gaussian LL Loss : {np.round(np.mean(losses),2)}')
-            print(f'Validation MSE   : {losses_valid} \n')
-    return losses_valid
+        losses_tr = losses_tr.item()/num_samples
+        if epoch+1 == num_epochs: 
+            print(f'Training MSE: {losses_tr} \n')
+        
+    loss_valid = test(model, Z_valid, 18)
+    return loss_valid
 
 def test(model: nn.Module,
-         data: torch.Tensor, 
-         cdfs:dict
+         data: torch.Tensor,
+         context_len:int
         ) -> torch.Tensor:
+    
+    model.eval()
     loss = torch.Tensor([0.0])
     count = 0
-    for i in range(6,data.size(0)):
-        z, z_targ = data[i-6:i], data[i:i+1]    
+    for i in range(context_len,data.size(0)):
+        z, z_targ = data[i-context_len:i], data[i:i+1]    
         count += 1
         with torch.no_grad():
             # run the model
             mu_t, _, _ = model(z, pred=True)
-            z_hat = inv_transform(mu_t[-1], cdfs)
-        
+            
             # use sampled z hat for next step prediction
-            mu_pred, _, _ = model(z_hat.unsqueeze(0), pred=True)
-            Z_tr_hat = inv_transform(mu_pred.detach(), cdfs)
-        
-        loss = loss + (Z_tr_hat - z_targ).pow(2).sum()
+            mu_pred, _, _ = model(mu_t[-1].unsqueeze(0), pred=True)
+        loss = loss + (mu_pred.view(-1) - z_targ.view(-1)).pow(2).sum()
     loss = loss/count
-    print(f'Prediction MSE : {loss}')
-    return loss
+    return loss.item()
     
 def objective(trial: optuna.Trial) -> float:
     # set up the parameter using optuna
-    LEARNING_RATE = trial.suggest_float("learning rate",1e-6,5e-3,log=True)
-    WEIGHT_DECAY  = trial.suggest_float("weight decay" ,1e-6,3e-2,log=True)
+    LEARNING_RATE = trial.suggest_float("learning rate",5e-5,1e-1,log=True)
+    WEIGHT_DECAY  = trial.suggest_float("weight decay" ,5e-5,1e-1,log=True)
     
+    prices_m = load_data('M')
+
     # define the GP-Copula model and initialize the weight
     # set up the loss function and optimizer
-    model = GPCopulaRNN(input_size=1, hidden_size=4, num_layers=2, rank_size=5, 
-                        batch_size=3, num_asset=7, dropout=0.1, features=config.e_dict)
+    model = GP_RNN(input_size=1, hidden_size=4, num_layers=2, rank_size=3, 
+                        batch_size=3, num_asset=7, dropout=0.1)
     optimizer = Adam(params=model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
-    # convert the data to torch tensor (70% train)
-    split_idx = int(lret_m.shape[0] * 0.7)
-    Z_tr = torch.Tensor(lret_m.iloc[:split_idx].values)
-
     # train the model and store network parameters in Trial user attribute
-    losses_valid = train(model, Z_tr, optimizer, config.NUM_SAMPLES, config.NUM_EPOCHS)
+    losses_valid = train(model, prices_m, optimizer, config.NUM_SAMPLES, config.NUM_EPOCHS)
     trial.set_user_attr('net_params', {'net_params':model.state_dict()})
     return losses_valid
 
