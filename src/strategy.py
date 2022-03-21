@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 from scipy.optimize import minimize, Bounds, LinearConstraint
-from network import GPCopulaRNN
+from network import GPCopulaNet
 
 class RiskParity:
     def __init__(self, data:pd.DataFrame, bound:list = [0, np.inf]):
@@ -82,7 +82,7 @@ class EnhancedRiskParity(RiskParity):
         self.b_table = pd.DataFrame(index=self.data["price"].index, columns=self.data["price"].columns)
 
         # include neural net and call trained parameters.
-        self.model = GPCopulaRNN(input_size=1, hidden_size=4, num_layers=2, rank_size=5, 
+        self.model = GPCopulaNet(input_size=1, hidden_size=4, num_layers=2, rank_size=5, 
                         batch_size=3, num_asset=7, dropout=0.05, cdfs=cdf)
         self.model.load_state_dict(torch.load('/Users/mac/Desktop/PycharmProjects/TAADL/models/GaussCopula.pt')['net_params'])
         

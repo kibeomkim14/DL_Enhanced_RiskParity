@@ -144,36 +144,6 @@ def inv_transform_3D(X:torch.Tensor, cdfs:dict) -> torch.Tensor:
     return torch.stack(Z, axis=0)
 
 
-def sequence_sampler(tr_idx:int, context_len:int, prediction_len:int, num_samples:int) -> list:
-    """
-    Given a train index (a point), with context length and prediction length, this function samples a sequence of length 
-    context_len + prediction_len for 'num_samples' times.
-    
-    INPUTS
-        tr_idx:int
-            an end point of training dataset. It is an integer
-        context_len:int
-            specifies the length of training interval. 
-        prediction_len:int
-            specifies the length of prediction interval. 
-        num_samples:
-            specifies the number of samples to be sampled
-    
-    RETURNS
-        sample_indices: list
-            a list of sampled indices each in the form of (training indices, prediction indices)
-    """
-    sample_indices = []
-    last_idx = None
-    for idx in np.random.randint(0,tr_idx - context_len, size=num_samples):
-        if last_idx == idx:
-            continue
-        sample_indices.append((torch.LongTensor(idx + np.arange(context_len)), \
-                            torch.LongTensor(idx + np.arange(prediction_len)+ context_len)))
-        last_idx = idx
-    return sample_indices
-
-
 def loss_GLL(x:torch.Tensor, mu_t:torch.Tensor, cov_t:torch.Tensor, type='sum') -> torch.Tensor:
     """
     calculates the log-loglikelihood value of multivariate gaussian process given true value
