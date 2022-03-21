@@ -1,207 +1,100 @@
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, Tuple
-from config import E_DICT
+from typing import Tuple
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 
-class MultiVariateGP(nn.Module):
-    def __init__(self, input_size:int, rank_size:int):
-        super(MultiVariateGP,self).__init__()
-        self.input_size = input_size
+class GPCopulaNet(nn.Module):
+    def __init__(
+        self, 
+        input_dim :int, 
+        hidden_dim:int, 
+        embed_dim :int,
+        num_layers:int,
+        num_assets:int,
+        seq_length:int,
+        pred_length:int,
+        batch_size:int,
+        rank_size:int,
+        dropout:float=0.1,
+        batch_first:bool=False,
+    ):
+        super(GPCopulaNet,self).__init__()
+        self.input_dim  = input_dim  
+        self.hidden_dim = hidden_dim 
+        self.embed_dim  = embed_dim 
+        self.num_layers = num_layers
+        self.num_assets = num_assets
+        self.seq_length = seq_length 
+        self.pred_length= pred_length
+        self.batch_size = batch_size
         self.rank_size  = rank_size
+        self.batch_first = batch_first
+        self.hidden = {}
+
+        # local lstm
+        self.embed = nn.Embedding(self.num_assets, self.embed_dim)
+        self.lstm  = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim,
+                             num_layers=num_layers, batch_first=batch_first, dropout=dropout)
 
         # define linear weight for calculating parameters of gaussian process
-        # these weights are SHARED across all time series.
-        self.layer_m = nn.Linear(input_size, 1) # mean 
-
-        self.layer_d = nn.Linear(input_size, rank_size) # diagonal point
-                                    
-        self.layer_v = nn.Sequential(
-                                        nn.Linear(input_size, 1),
+        self.layer_m = nn.Linear(self.hidden_dim + self.embed_dim, 1) # mean 
+        self.layer_v = nn.Linear(self.hidden_dim + self.embed_dim, self.rank_size) # diagonal point               
+        self.layer_d = nn.Sequential(
+                                        nn.Linear(self.hidden_dim + self.embed_dim, 1),
                                         nn.Softplus(beta=1)
                                     ) # volatility
 
-    def forward(self, h_t:torch.Tensor):
-        m_t = self.layer_m(h_t)
-        d_t = self.layer_d(h_t)
-        v_t = self.layer_v(h_t)
-        return m_t, d_t, v_t
+    def init_weight(self):
+        for i in range(self.num_assets):
+            self.hidden['asset_'+str(i)] = (torch.zeros(self.num_layers, self.batch_size, self.hidden_dim),\
+                                            torch.zeros(self.num_layers, self.batch_size, self.hidden_dim))
 
+    def forward(self, inputs:torch.Tensor, indices:torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        INPUTS
+            inputs  : torch.Tensor.Size(sequence_length x num_sampled_assets)
+            indices : torch.Tensor.Size(num_sampled_assets)
+        OUTPUTS
+            mu_t  : torch.Tensor.Size(sequence_length x num_sampled_assets x 1)
+            cov_t : torch.Tensor.Size(sequence_length x num_sampled_assets x num_sampled_assets)
+        """
+        mus, vs, ds = [], [], []
+        for idx in indices: # for each asset
+            output, (h, c)  = self.lstm(inputs.unsqueeze(1)[:,:,idx:idx+1], self.hidden['asset_'+str(idx.item())])
+            self.hidden['asset_'+str(idx.item())] = (h.detach(), c.detach()) # store hidden state
 
+            # concatenate h_it with embeddings e_i
+            embedding = self.embed(torch.ones(inputs.size(0)).type(torch.long) * idx)
+            y = torch.concat([output, embedding.unsqueeze(1)], axis=2)
 
-class GP_RNN(nn.Module):
-    def __init__(
-        self, 
-        input_size:int, 
-        hidden_size:int, 
-        num_layers:int, 
-        batch_size:int,
-        num_asset:int,
-        rank_size:int,
-        dropout:float=0.1,
-        batch_first:bool=False,
-    ):
-        super(GP_RNN,self).__init__()
-        self.input_size   = input_size
-        self.hidden_size  = hidden_size
-        self.batch_size   = batch_size
-        self.num_asset    = num_asset
-        self.num_layers   = num_layers
-        self.batch_first  = batch_first
-        self.features     = E_DICT
-        self.feature_size = len(self.features[0])
-        self.hidden = None
+            # calculate mean and variances of asset i
+            mus.append(self.layer_m(y).view(inputs.size(0),1))
+            ds.append(self.layer_d(y).view(inputs.size(0),1))
+            vs.append(self.layer_v(y).view(inputs.size(0),self.rank_size))
 
-        # local lstm
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
-                             num_layers=num_layers, batch_first=batch_first, dropout=dropout)
-        
-        # Multivariate Gaussian Process
-        self.gp = MultiVariateGP(input_size=hidden_size + self.feature_size, rank_size=rank_size)
-
-    def init_weight(self) -> None:
-        h0, c0 = torch.zeros(self.num_layers, self.num_asset, self.hidden_size),\
-                    torch.zeros(self.num_layers, self.num_asset, self.hidden_size)
-        self.hidden = (h0, c0)
-
-    def feature_selector(self, indices:torch.Tensor, time_steps:int) -> torch.Tensor:
-        feature = []
-        for idx in indices:
-            feature.append(self.features[idx.item()].repeat(time_steps,1))
-        feature = torch.stack(feature, axis=1)
-        return feature
-
-    def forward(self, z_t:torch.Tensor, pred:bool=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if len(z_t.size()) == 2:
-            z_t = z_t.unsqueeze(2)
-
-        # select the batch then pass it through the unrolled LSTM
-        # timestep x num_batch x 1
-        output, (hn, cn) = self.lstm(z_t, self.hidden)
-        self.hidden = (hn.detach(), cn.detach())
-        
-        # we only use the subset of batch for training
-        # else return all indices
-        if pred:
-            batch_indices = torch.arange(self.num_asset)
-        else:
-            batch_indices = torch.randperm(self.num_asset)[:self.batch_size]
-        
-        # find feature vector e_i for each asset i then concatenate it with LSTM output.
-        e = self.feature_selector(batch_indices, z_t.size(0))
-        y_t = torch.concat([output[:,batch_indices,:], e], axis=2)
-
-        # get GP parameters
-        # calculate parameters of multivariate gaussian process for each time t
-        mu_t, v_t, d_t = self.gp(y_t)
+        mu_t, d_t, v_t = torch.stack(mus, axis=1), torch.stack(ds, axis=1), torch.stack(vs, axis=1)
         cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
-        return mu_t, cov_t, batch_indices
+        return mu_t, cov_t
 
-    def predict(self, z_t:torch.Tensor, num_samples:int=1) -> Tuple[torch.Tensor, torch.Tensor]:
-        if len(z_t.size()) == 2:
-            z_t = z_t.unsqueeze(2)
-
-        zs = []
+    def predict(self, z:torch.Tensor, num_samples:int=10):
+        self.eval()
+        x_samples  = []
+        hidden_original = self.hidden.copy()
+        
         with torch.no_grad():
-            for _ in range(num_samples):
-                mu_t, _, _ = self.forward(z_t, pred=True)
-                # use sampled z hat for next step prediction
-                z_pred, _, _ = self.forward(mu_t[-1].unsqueeze(0), pred=True)
-                zs.append(z_pred)
-        zs = torch.stack(zs)
-        z_mean, z_std = zs.mean(axis=0), zs.std(axis=0)
-        return z_mean, z_std
-
-
-
-class GPCopulaRNN(nn.Module):
-    def __init__(
-        self, 
-        input_size:int, 
-        hidden_size:int, 
-        num_layers:int, 
-        batch_size:int,
-        num_asset:int,
-        rank_size:int,
-        cdfs:dict,
-        dropout:float=0.1,
-        batch_first:bool=False,
-    ):
-        super(GPCopulaRNN,self).__init__()
-        self.input_size   = input_size
-        self.hidden_size  = hidden_size
-        self.batch_size   = batch_size
-        self.num_asset    = num_asset
-        self.num_layers   = num_layers
-        self.batch_first  = batch_first
-        self.distribution = cdfs
-        self.features     = E_DICT
-        self.feature_size = len(self.features[0])
-        self.hidden = None
-
-        
-        # local lstm
-        self.lstm = nn.LSTM(input_size=input_size, hidden_size=hidden_size,
-                             num_layers=num_layers, batch_first=batch_first, dropout=dropout)
-        
-        # Multivariate Gaussian Process
-        self.gp = MultiVariateGP(input_size=hidden_size + self.feature_size, rank_size=rank_size, dropout=dropout)
-
-    def init_weight(self) -> None:
-        h0, c0 = torch.zeros(self.num_layers, self.num_asset, self.hidden_size),\
-                    torch.zeros(self.num_layers, self.num_asset, self.hidden_size)
-        self.hidden = (h0, c0)
-
-    def feature_selector(self, indices:torch.Tensor, time_steps:int) -> torch.Tensor:
-        feature = []
-        for idx in indices:
-            feature.append(self.features[idx.item()].repeat(time_steps,1))
-        feature = torch.stack(feature, axis=1)
-        return feature
-
-    def forward(self, z_t:torch.Tensor, pred:bool=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if len(z_t.size()) == 2:
-            z_t = z_t.unsqueeze(2)
-
-        # select the batch then pass it through the unrolled LSTM
-        # timestep x num_batch x 1
-        output, (hn, cn) = self.lstm(z_t, self.hidden)
-        self.hidden = (hn.detach(), cn.detach())
-        
-        # we only use the subset of batch for training
-        # else return all indices
-        if pred:
-            batch_indices = torch.arange(self.num_asset)
-        else:
-            batch_indices = torch.randperm(self.num_asset)[:self.batch_size]
-        
-        # find feature vector e_i for each asset i then concatenate it with LSTM output.
-        e = self.feature_selector(batch_indices, z_t.size(0))
-        y_t = torch.concat([output[:,batch_indices,:], e], axis=2)
-
-        # get GP parameters
-        # calculate parameters of multivariate gaussian process for each time t
-        mu_t, v_t, d_t = self.gp(y_t)
-        cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
-        return mu_t, cov_t, batch_indices
-
-    def predict(self, z_t:torch.Tensor, num_samples:int=1) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from utils import inv_transform
-        if len(z_t.size()) == 2:
-            z_t = z_t.unsqueeze(2)
-
-        zs = []
-        with torch.no_grad():
-            for _ in range(num_samples):
-                mu_t, _, _ = self.forward(z_t, pred=True)
-                z_hat = inv_transform(mu_t[-1], self.distribution)
-            
-                # use sampled z hat for next step prediction
-                mu_pred, _, _ = self.forward(z_hat.unsqueeze(0), pred=True)
-                z_pred = inv_transform(mu_pred.detach(), self.distribution)
-                zs.append(z_pred)
-
-        zs = torch.stack(zs)
-        z_mean, z_std = zs.mean(axis=0), zs.std(axis=0)
-        return z_mean, z_std
+            for i in range(num_samples):
+                input = z
+                trajectory = []
+                for t in range(self.pred_length):
+                    mu, cov = self.forward(input, torch.arange(self.num_assets))
+                    distrib = MultivariateNormal(mu.view(-1), cov)
+                    sample = distrib.sample((1,)).squeeze(0)
+                    trajectory.append(sample.view(-1))
+                    input = sample
+                x_samples.append(torch.stack(trajectory, axis=0))
+                    
+        # revert hidden states to the point before prediction range.
+        self.hidden = hidden_original
+        return torch.stack(x_samples,axis=0)

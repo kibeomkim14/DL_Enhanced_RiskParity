@@ -1,51 +1,33 @@
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 
-from config import PARAM_PATH, DATA_PATH
 from scipy.stats import norm
-from network import GPCopulaRNN
 from typing import Optional, Tuple
-from torch.utils.data import Dataset
-from scipy.interpolate import interp1d
+from distribution import ECDF_
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 
-def load_data(interval:str='M') -> Tuple[pd.DataFrame,pd.DataFrame]:
-    # import feature 
-    prices = pd.read_csv(DATA_PATH+'/prices.csv', index_col='Date')
-
-    # preprocess weekly data
-    prices.index = pd.to_datetime(prices.index)
-    if interval != 'D':
-        prices = prices.resample(interval).last()
-    return prices
-
-
-def train_test_split(data_monthly:pd.DataFrame, split_ratio:float=0.7) -> Tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,dict]:
+def train_test_split(df:pd.DataFrame, split_year:int=2016) -> Tuple[pd.DataFrame,pd.DataFrame]:
     """
     학습 데이터와 시험 데이터를 나눠주는 함수입니다. split_ratio 를 이용해서 원하는 비율로 나눌 수 있습니다.
     splits a dataset into train and test sets given a split ratio.
 
     INPUT
-        data_monthly: pd.DataFrame
+        df: pd.DataFrame
             monthly price of assets
         split_ratio: float
             specifies the ratio of train set over the whole.
     RETURNS
-        Z_tr, Z_te, X_tr, X_te: Tuple[torch.tensor...]
-            returns train & test monthly return data, raw and transformed
-        cdf: dict
-            dictionary containing a number of empirical CDFs.    
+        df_tr, df_te: Tuple[pd.DataFrame,pd.DataFrame]
+            returns train & test data
     """
-    # monthly return
-    lret_m = np.log(data_monthly/data_monthly.shift(1)).fillna(0.0) 
-
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+        
     # convert the data to torch tensor
-    split_idx = int(lret_m.shape[0] * split_ratio)
-    Z_tr, Z_te = torch.Tensor(lret_m.iloc[:split_idx].values), torch.Tensor(lret_m.iloc[split_idx:].values)
-    return Z_tr, Z_te
+    df_tr, df_te = df.loc[:str(split_year)], df.loc[str(split_year+1):]
+    return df_tr, df_te
 
 
 def transform(Z:torch.Tensor, cdfs:Optional[dict]=None) -> Tuple[torch.Tensor,dict]:
@@ -80,11 +62,11 @@ def transform(Z:torch.Tensor, cdfs:Optional[dict]=None) -> Tuple[torch.Tensor,di
     # lower and upper bound for emp. CDF
     delta_m = (4 * np.sqrt(np.log(m) * np.pi) * m ** 0.25) ** -1 
     data = torch.clone(Z).numpy()
+
     for i in range(data.shape[1]):
-        Z_i = data[:,i]
-        
         # estimate empirical CDF
         # only use m datapoint to estimate CDF.
+        Z_i = data[:,i]
         if cdfs is not None:
             emp_cdf = cdfs['CDF_'+str(i)]
         else:
@@ -107,7 +89,7 @@ def transform(Z:torch.Tensor, cdfs:Optional[dict]=None) -> Tuple[torch.Tensor,di
     return X, emp_distributions
 
 
-def inv_transform(X:torch.Tensor, cdfs:dict) -> pd.DataFrame:
+def inv_transform(X:torch.Tensor, cdfs:dict) -> torch.Tensor:
     """
     inverse transforms standard normal distribution to the original distribution given a set of
     empirical cdfs.
@@ -147,6 +129,20 @@ def inv_transform(X:torch.Tensor, cdfs:dict) -> pd.DataFrame:
     Z = torch.stack(Z, axis=0).T
     return Z
 
+
+def inv_transform_3D(X:torch.Tensor, cdfs:dict) -> torch.Tensor:
+    """
+    inverse transform the 3D Tensor given empirical CDF class. For more details, see the function above.
+    """
+    assert len(X.size()) == 3, \
+        'Tensor dimension is not equal to 3. Use inv_transform function instead.'
+
+    Z = []
+    for i in range(X.size(0)):
+        Z.append(inv_transform(X[i], cdfs))
+    return torch.stack(Z, axis=0)
+
+
 def sequence_sampler(tr_idx:int, context_len:int, prediction_len:int, num_samples:int) -> list:
     """
     Given a train index (a point), with context length and prediction length, this function samples a sequence of length 
@@ -177,7 +173,11 @@ def sequence_sampler(tr_idx:int, context_len:int, prediction_len:int, num_sample
     return sample_indices
 
 
-def gaussian_loss(x:torch.Tensor, mu_t:torch.Tensor, cov_t:torch.Tensor) -> torch.Tensor:
+def loss_GLL(x:torch.Tensor, mu_t:torch.Tensor, cov_t:torch.Tensor, type='sum') -> torch.Tensor:
+    """
+    calculates the log-loglikelihood value of multivariate gaussian process given true value
+    x and loc, scale parameters.
+    """
     assert x.size(0) == mu_t.size(0), \
         'sequence length is not equal (input and mu_t)'
     assert mu_t.size(0) == cov_t.size(0), \
@@ -197,7 +197,8 @@ def gaussian_loss(x:torch.Tensor, mu_t:torch.Tensor, cov_t:torch.Tensor) -> torc
     # calculate MAPE
     mape = ((mu_t - x).abs()/x.abs())
     mape = torch.where(mape > 100, torch.ones(mape.size()) * 100, mape)
-    return -loglikelihood.sum() + mape.detach().sum() # negative log-likelihood + MAPE
+    #+ mape.detach().sum() 
+    return -loglikelihood.sum() if type=='sum' else -loglikelihood.mean() # negative log-likelihood + MAPE
 
 
 def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
@@ -205,34 +206,3 @@ def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
     mean_return = portfolio_return.mean() * torch.tensor(252)
     volatility  = portfolio_return.std() * torch.sqrt(torch.tensor(252))
     return -mean_return/volatility
-
-
-class ECDF_(object):
-    def __init__(self, data:np.ndarray):
-        self.x = data
-        self.x.sort()
-        self.x_min, self.x_max = self.x[0], self.x[-1]
-        self.n = len(self.x)
-        self.y = np.linspace(1.0/self.n, 1.0, self.n)
-        self.f = interp1d(self.x, self.y, fill_value='extrapolate') # make interpolation
-        self.inv_f = interp1d(self.y, self.x, fill_value='extrapolate') # inverse is just arguments reversed
-        
-    def __call__(self, x_:np.ndarray) -> np.ndarray:
-        """
-        calculates y given x under defined ECDF class.
-        """
-        if np.sum(x_ > self.x_max) > 0 or np.sum(x_ < self.x_min) > 0:
-            x_ = np.where(x_ > self.x_max, self.x_max, x_)
-            x_ = np.where(x_ < self.x_min, self.x_min, x_)
-        return self.f(x_)
-
-    def inverse(self, y:np.ndarray) -> np.ndarray:
-        """
-        calculates the inverse of ECDF with y as an input.
-        """
-         # if cdf value is less than 0 or more than 1, trim values
-        if np.sum(y > 1.0) > 0 or np.sum(y < 0.0) > 0:
-            y = np.where(y > 1.0, 1.0, y)
-            y = np.where(y < 0.0, 0.0, y)
-        return self.inv_f(y) # otherwise, return
-
