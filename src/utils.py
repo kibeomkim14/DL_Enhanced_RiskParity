@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
 
 from scipy.stats import norm
 from typing import Optional, Tuple
@@ -206,3 +207,27 @@ def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
     mean_return = portfolio_return.mean() * torch.tensor(252)
     volatility  = portfolio_return.std() * torch.sqrt(torch.tensor(252))
     return -mean_return/volatility
+
+
+def plot_prediction(ground_truth:torch.Tensor, z_mean:torch.Tensor, z_std:torch.Tensor):
+    ground_truth, z_mean, z_std = ground_truth.numpy(), z_mean.numpy(), z_std.numpy()
+    T, n = z_mean.shape[0], z_mean.shape[1]
+    
+    # build confidence interval (1sigma, 2sigma)
+    sig1_pos, sig1_neg = z_mean + z_std, z_mean - z_std
+    sig2_pos, sig2_neg = z_mean + z_std * 2, z_mean - z_std * 2
+
+    # start plotting
+    fig, axs = plt.subplots(4,2, figsize=(20,15))
+    axs = axs.flatten()
+
+    for i, ax in enumerate(axs):
+        if i == n:
+            break
+        ax.plot(np.arange(T), ground_truth[:,i], label='ground truth', color='black')
+        ax.plot(np.arange(T), z_mean[:,i], ls='--', label='prediction', color='blue')
+        ax.fill_between(np.arange(T), sig1_pos[:,i], sig1_neg[:,i], alpha=0.3, color='blue') # 1 sigma zones
+        ax.fill_between(np.arange(T), sig2_pos[:,i], sig2_neg[:,i], alpha=0.15, color='purple') # 2 sigma zones
+
+    plt.legend(['ground_truth', 'prediction'])
+    plt.show()

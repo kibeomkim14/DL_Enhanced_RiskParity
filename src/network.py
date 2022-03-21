@@ -20,6 +20,7 @@ class GPCopulaNet(nn.Module):
         dropout:float=0.1,
         batch_first:bool=False,
     ):
+        torch.set_default_dtype(torch.float64)
         super(GPCopulaNet,self).__init__()
         self.input_dim  = input_dim  
         self.hidden_dim = hidden_dim 

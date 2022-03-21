@@ -7,6 +7,7 @@ import numpy as np
 import argparse
 import config
 import json 
+import logging
 
 from optuna import trial
 from typing import Tuple
@@ -23,6 +24,8 @@ def train(
         num_epochs:int,
         is_copula:bool
     ) -> torch.Tensor:
+
+    logger = logging.getLogger('GPCopula.train')
 
     # initialize weight and put the model on training mode.
     model.init_weight()
@@ -81,7 +84,7 @@ def test(model: nn.Module,
     loss = loss/count
     return loss.item()
     
-def objective(trial: optuna.Trial, is_copula:bool) -> float:
+def objective(trial: optuna.Trial) -> float:
     # set up the parameter using optuna
     LEARNING_RATE = trial.suggest_float("learning rate",5e-5,1e-1,log=True)
     WEIGHT_DECAY  = trial.suggest_float("weight decay" ,5e-5,1e-1,log=True)
