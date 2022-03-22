@@ -1,11 +1,11 @@
+import torch
 import numpy as np
 import pandas as pd
-import torch
 import matplotlib.pyplot as plt
 
 from scipy.stats import norm
-from typing import Optional, Tuple
 from distribution import ECDF_
+from typing import Optional, Tuple
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 
@@ -179,7 +179,18 @@ def sharpe_ratio(weight:torch.Tensor, lret:torch.Tensor) -> torch.Tensor:
     return -mean_return/volatility
 
 
-def plot_prediction(ground_truth:torch.Tensor, z_mean:torch.Tensor, z_std:torch.Tensor):
+def plot_prediction(
+            ground_truth:torch.Tensor,
+            z_mean:torch.Tensor, 
+            z_std:torch.Tensor, 
+            month:str, 
+            note:str=None
+            ):
+    """
+    plots ground truth with prediction interval and mean in the prediction inteval.
+    After plotting, the function prompts the machine to save the image to the specified path.
+    """
+    asset_list = ['IEV', 'EEM', 'AGG', 'IEF', 'IYR', 'IAU', 'ITOT']
     ground_truth, z_mean, z_std = ground_truth.numpy(), z_mean.numpy(), z_std.numpy()
     T, n = z_mean.shape[0], z_mean.shape[1]
     
@@ -198,6 +209,10 @@ def plot_prediction(ground_truth:torch.Tensor, z_mean:torch.Tensor, z_std:torch.
         ax.plot(np.arange(T), z_mean[:,i], ls='--', label='prediction', color='blue')
         ax.fill_between(np.arange(T), sig1_pos[:,i], sig1_neg[:,i], alpha=0.3, color='blue') # 1 sigma zones
         ax.fill_between(np.arange(T), sig2_pos[:,i], sig2_neg[:,i], alpha=0.15, color='purple') # 2 sigma zones
+        ax.set_title(asset_list[i])
+        ax.set_xlabel('timestep')
+        ax.set_ylabel('weekly return')
 
+    fig.suptitle(f'Prediction in {month}')
     plt.legend(['ground_truth', 'prediction'])
-    plt.show()
+    plt.savefig(f'/Users/mac/Desktop/PycharmProjects/TAADL/images/prediction_{month}_{note}.png')

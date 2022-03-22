@@ -5,6 +5,7 @@ import pandas as pd
 import optuna
 import argparse
 import logging
+import joblib 
 
 from config import *
 from torch.optim import Adam
@@ -40,7 +41,7 @@ def train(
             train_batch, indice = train_batch.squeeze(0), torch.randperm(7)[:3]
             mu, cov = model(train_batch, indice)
             x, _ = transform(train_batch, cdf_tr)
-            loss = loss + loss_GLL(x[:,indice], mu, cov)
+            loss = loss + loss_GLL(x[:,indice], mu, cov, 'mean')
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -61,7 +62,7 @@ def evaluate(
     ) -> torch.Tensor:
     
     logging.getLogger('GPCopula.Eval')
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.MSELoss('mean')
 
     model.eval()
     pred, truth = [], []
@@ -79,15 +80,15 @@ def evaluate(
 
     pred  = torch.stack(pred, axis=0)
     truth = torch.stack(truth, axis=0)
-    loss = loss_fn(pred, truth)
-    print(f'Validation MSE: {loss.item()}')
+    loss = torch.sqrt(loss_fn(pred, truth))
+    print(f'Validation RMSE: {loss.item()}')
     return loss.item()
     
 def objective(trial: optuna.Trial) -> float:
     # set up the parameter using optuna
     LEARNING_RATE = trial.suggest_float("learning rate",5e-5,1e-1,log=True)
     WEIGHT_DECAY  = trial.suggest_float("weight decay" ,5e-5,1e-1,log=True)
-    
+    print(trial.number)
     # set up the data
     # load and preprocess the data
     feature = pd.read_csv(DATA_PATH+'log_return.csv', index_col='Date')
@@ -101,6 +102,8 @@ def objective(trial: optuna.Trial) -> float:
     # train the model and store network parameters in Trial user attribute
     losses_valid = train(model, df_tr, optimizer, NUM_SAMPLES, NUM_EPOCHS)
     trial.set_user_attr('net_params', {'net_params':model.state_dict()})
+    if trial.number %5 ==0:
+        joblib.dump(study, 'models/study.pkl')
     return losses_valid
 
 if __name__ == "__main__":
@@ -110,9 +113,9 @@ if __name__ == "__main__":
     # add argument
     parser.add_argument("--n_trials" ,type=int)
     args = parser.parse_args()
-
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=args.n_trials)
+    
     print('Hyperparameter search complete.')
     
     # store parameters
@@ -121,4 +124,4 @@ if __name__ == "__main__":
     parameters['hyp_params'] = hyp_params
     
     print('saving parameters...')
-    torch.save(parameters, 'models/GPCopulaNet.pt')
+    torch.save(parameters, 'models/GPCopulaNet_mean.pt')
