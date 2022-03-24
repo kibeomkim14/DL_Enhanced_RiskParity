@@ -1,4 +1,5 @@
 
+from multiprocessing import reduction
 import torch 
 import torch.nn as nn
 import pandas as pd
@@ -7,6 +8,7 @@ import argparse
 import logging
 import joblib 
 
+from tqdm import tqdm
 from config import *
 from torch.optim import Adam
 from network import GPCopulaNet
@@ -27,7 +29,7 @@ def train(
 
     valid_split = int(data.shape[0] * 0.8)
     df_tr, df_vl = data.iloc[:valid_split], data.iloc[valid_split-SEQ_LENGTH:]
-    dataset_tr, dataset_te = TrainDataset(df_tr, context_len=SEQ_LENGTH), EvalDataset(df_vl, context_len=SEQ_LENGTH)
+    dataset_tr, dataset_te = TrainDataset(df_tr, context_len=SEQ_LENGTH), EvalDataset(df_vl, context_mth=int(SEQ_LENGTH/4))
     _, cdf_tr = transform(torch.Tensor(df_tr.values))
     loader = DataLoader(dataset_tr, batch_size=1)
 
@@ -35,7 +37,7 @@ def train(
     model.init_weight()
     model.train()
 
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs)):
         loss = torch.Tensor([0.0])
         for n_step, (train_batch, _) in enumerate(loader):
             train_batch, indice = train_batch.squeeze(0), torch.randperm(7)[:3]
@@ -62,33 +64,35 @@ def evaluate(
     ) -> torch.Tensor:
     
     logging.getLogger('GPCopula.Eval')
-    loss_fn = nn.MSELoss('mean')
+    loss_fn = nn.MSELoss(reduction='mean')
 
     model.eval()
     pred, truth = [], []
     loader = DataLoader(dataset, batch_size=1)
 
-    for _, (test_batch, label) in enumerate(loader):
+    for _, (test_batch, label, mth) in enumerate(loader):
         test_batch, indice = test_batch.squeeze(0), torch.arange(7)
         _, _ = model(test_batch, indice)
 
-        x_hat = model.predict(test_batch[-2:-1], num_samples)
+        x_hat = model.predict(test_batch[-2:-1], num_samples, label.size(1))
         z_hat = inv_transform_3D(x_hat, cdf)
         z_mean, _ = z_hat.mean(axis=0), z_hat.std(axis=0)
         pred.append(z_mean)
         truth.append(label.squeeze(0))
 
-    pred  = torch.stack(pred, axis=0)
-    truth = torch.stack(truth, axis=0)
-    loss = torch.sqrt(loss_fn(pred, truth))
-    print(f'Validation RMSE: {loss.item()}')
-    return loss.item()
+    losses = torch.zeros((len(z_hat),1))
+    loss_fn = nn.MSELoss()
+    
+    for t in range(len(pred)):
+        losses[t] = loss_fn(pred[t], truth[t])
+    valid_loss = losses.mean().item()
+    print(f'Validation RMSE: {valid_loss}')
+    return valid_loss
     
 def objective(trial: optuna.Trial) -> float:
     # set up the parameter using optuna
     LEARNING_RATE = trial.suggest_float("learning rate",5e-5,1e-1,log=True)
     WEIGHT_DECAY  = trial.suggest_float("weight decay" ,5e-5,1e-1,log=True)
-    print(trial.number)
     # set up the data
     # load and preprocess the data
     feature = pd.read_csv(DATA_PATH+'log_return.csv', index_col='Date')

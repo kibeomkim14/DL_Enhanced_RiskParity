@@ -78,16 +78,15 @@ class GPCopulaNet(nn.Module):
         cov_t = torch.diag_embed(d_t.squeeze(2)) + (v_t @ v_t.permute(0,2,1)) # D + V @ V.T
         return mu_t, cov_t
 
-    def predict(self, z:torch.Tensor, num_samples:int=10, pred_len:Optional[int]=None):
+    def predict(self, z:torch.Tensor, num_samples:int=10, pred_len:int=4):
         self.eval()
         x_samples  = []
         hidden_original = self.hidden.copy()
-        T = pred_len if pred_len is not None else self.pred_length
         with torch.no_grad():
             for i in range(num_samples):
                 input = z
                 trajectory = []
-                for t in range(T):
+                for t in range(pred_len):
                     mu, cov = self.forward(input, torch.arange(self.num_assets))
                     distrib = MultivariateNormal(mu.view(-1), cov)
                     sample = distrib.sample((1,)).squeeze(0)
