@@ -19,6 +19,8 @@ pip install -r requirements.pip
 ├── input
 │   └── original_data /S&Pctsfuture.csv
 │── notebooks
+│── models
+│   └── GPCouplaNet_mean.pt
 └── src
     ├── preprocessing.py
     ├── param_search.py
